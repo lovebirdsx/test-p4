@@ -1,0 +1,30 @@
+{
+  "name": "test-p4",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "本地自包含的 Perforce (Helix Core) 机制测试沙箱：在本目录内起 p4d、建 depot 与 client 工作区，不依赖任何远程服务器",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "sandbox:up": "node scripts/sandbox.ts up",
+    "sandbox:down": "node scripts/sandbox.ts down",
+    "sandbox:status": "node scripts/sandbox.ts status",
+    "sandbox:reset": "node scripts/sandbox.ts reset",
+    "sandbox:snapshot": "node scripts/sandbox.ts snapshot",
+    "sandbox:clean": "node scripts/sandbox.ts clean",
+    "fetch:p4d": "node scripts/fetch-p4d.ts",
+    "probe:specs": "node scripts/probe-specs.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:basic": "vitest run test/basic",
+    "test:destructive": "vitest run test/destructive",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  }
+}

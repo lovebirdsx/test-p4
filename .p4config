@@ -1,0 +1,7 @@
+# 在本工程目录内手工敲 p4 命令时，自动指向本地沙箱，避免走到机器级的全局配置。
+# 注意：自动化测试/脚本不依赖本文件 —— 它们通过 src/env.ts 与 src/exec.ts 显式注入。
+P4PORT=127.0.0.1:1666
+P4USER=sandbox
+P4CLIENT=sandbox_main
+P4IGNORE=.p4ignore
+P4CHARSET=utf8

@@ -1,0 +1,16 @@
+# 依赖
+node_modules/
+
+# 沙箱运行时数据（p4d root、depot 物理文件、工作区、日志、票据、pid）
+.sandbox/
+
+# 可选的本地 p4d / p4 二进制（由 pnpm fetch:p4d 下载）
+vendor/
+
+# checkpoint / journal 产物
+*.ckp
+*.ckp.gz
+*.ckp.*
+
+# 会话产物（代码库探查结果等）
+.claude/explore-results/

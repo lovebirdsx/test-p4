@@ -26,6 +26,7 @@ test-p4/
 │  ├─ parse.ts            #   -ztag 输出解析与表单字段读写
 │  ├─ p4d.ts              #   p4d 生命周期（启动/就绪/停止/模板快照）
 │  ├─ seed.ts             #   标准夹具：depot / 用户 / 工作区 / 提交历史
+│  ├─ timing.ts           #   可选的耗时观测（P4_SANDBOX_TIMING=1）
 │  └─ sandbox.ts          #   门面 Sandbox + 被测工具句柄 + 隔离自检
 ├─ scripts/
 │  ├─ sandbox.ts          # 管理 CLI（up/down/status/reset/snapshot/clean）
@@ -36,12 +37,15 @@ test-p4/
 │  ├─ global-setup.ts     # 只跑一次：生成基线模板
 │  ├─ helpers.ts          # 断言与文件辅助
 │  ├─ basic/              # 基础工作流机制
-│  ├─ destructive/        # 破坏性实验与重置
+│  ├─ destructive/        # 破坏性实验与重置（一条 reset 语义一个文件）
 │  ├─ integration/        # 被测工具接入
-│  └─ isolation.test.ts   # 隔离防护的负向验证
+│  ├─ isolation.test.ts   # 隔离防护的负向验证
+│  └─ isolation-env-precedence.test.ts   # 环境变量优先级（不用夹具，见"性能"）
 ├─ examples/under-test/   # 「被测工具」样例
 └─ .sandbox/              # [gitignore] 运行时数据，可整体删除
    ├─ template/           #   seed 后的服务器快照（秒级重置的来源）
+   ├─ template-clients.json # 模板里 client 表单原文的缓存（省 3 次 p4 往返）
+   ├─ empty/              #   "空 Unicode 库"骨架（省掉现场跑 p4d -xi 的约 250ms）
    ├─ server/             #   常驻沙箱的 p4d root
    ├─ instances/          #   测试用的一次性实例
    ├─ ws/                 #   client 工作区
@@ -122,7 +126,15 @@ p4 只把**命令之前**的选项当作全局选项（实测：`p4 info -p x:1`
 `serverRoot` 是服务器自己报出的数据库目录，唯一且可信。
 
 `test/isolation.test.ts` 对这几层做负向验证：自带全局选项被拒、环境里没有预期外的 `P4*` 变量、
-指向关闭端口时连的就是该端口、`serverRoot` 不匹配时自检抛错。
+缓存的就绪探测记录确实指向本实例、`serverRoot` 不匹配时自检抛错；
+`test/isolation-env-precedence.test.ts` 单独验"环境变量压过注册表"那一条。
+
+**性能注记**：自检不会额外多发一次 `p4 info` —— 就绪探测（`P4dServer.waitReady()`）本来就要
+跑一次 `p4 info`，它把 `-z tag` 解析出的记录留在 server 实例上（`lastInfo`），自检直接复用。
+判据本身一字未改，改的只是"每次自检都现查"→"启动时查一次"。缓存挂在 `P4dServer` 实例上，
+而 `reset()` 会换一个新的 server 实例，所以缓存不会过期；`Sandbox.attach()` 从未跑过就绪探测
+（`lastInfo` 为 undefined），自检会退回现查。`test/isolation.test.ts` 里有一条用例专门确认
+缓存的记录确实指向本实例 —— 否则"省掉一次查询"就会悄悄变成"跳过一次校验"。
 
 ### 防护边界（不能防什么）
 
@@ -148,7 +160,16 @@ p4 只把**命令之前**的选项当作全局选项（实测：`p4 info -p x:1`
 
 **就绪**：轮询 `p4 info -s`（短输出，响应快），失败时读日志尾部作为诊断信息抛出。
 
-**停止**：优先 `p4 admin stop`（会干净收尾 journal），超时后按 pid 文件 `taskkill /T /F`。
+**停止**：默认走 `p4 admin stop`（会干净收尾 journal），超时后按 pid 文件 `taskkill /T /F`。
+但**p4d 收尾本身要花约 950ms** —— 这是重置路径上最大的一笔开销，远超"少起几次 p4 子进程"
+能省下的量。所以 `reset()` / `dispose()` 用 `stop({ force: true })` 直接强杀：它们紧接着
+就会覆盖或删除整个数据库，那份干净 journal 没有任何保留价值。需要保留数据的调用方
+（`ensureTemplate` 的快照、`sandbox:down`）才走默认路径。
+
+> ⚠️ **强杀之后必须删掉 journal。** journal 位于 root **外面**（见 `instancePaths()`），
+> 不会被模板复制覆盖；残留下来会在下次启动时被 p4d 重放到新数据库上 —— 等于把刚重置掉的
+> 内容又变回来。`reset()` 里显式 `rmrf(inst.journal)`。删掉后 p4d 会新建一份，与"实例首次
+> 启动"的状态完全一致（该状态本来就由既有用例证明可行：新实例目录里从来没有 journal）。
 
 **Unicode**：`P4CHARSET=utf8` 要求服务器处于 Unicode 模式，
 全新目录需要先跑一次 `p4d -r <root> -xi` 初始化（输出 `Server switched to Unicode mode.`），
@@ -160,17 +181,32 @@ p4 只把**命令之前**的选项当作全局选项（实测：`p4 info -p x:1`
 ## 模板与重置
 
 `ensureTemplate()` 用一个临时实例跑完整 seed，停掉 p4d 后把**数据库目录**复制成 `.sandbox/template/`。
-之后所有实例都从它复制，重置就是"停服务 → 删 root → 复制模板 → 重启 → 重建工作区"，实测约 1.7 秒。
+之后所有实例都从它复制，重置就是"强杀 → 删 root/journal → 复制模板 → 重启 → 重定向 client → `sync -f`"，
+实测约 0.5 秒（原先是 1.7 秒，差在不再等 p4d 做那约 950ms 的干净收尾）。
 
 journal / log / pid / 票据文件刻意放在 root **外面**（见 `instancePaths()`），
 保证模板永远是干净的纯数据库。
 
+模板还有一份 sidecar：`.sandbox/template-clients.json`，存着模板里 client 表单的**原文**
+（`p4 client -o` 的输出）连同模板指纹（`db.domain` 的大小 + mtime）。实例侧于是只做一次
+`client -i` 就能把 Root 指回自己，省掉"列出 client + 每个 client 读一次表单"这 3 次 p4 往返。
+sidecar 缺失或指纹不符时 `ensureTemplate()` 会重建整份模板（自愈，不需要手工删目录），
+而 `#retargetClients()` 会退回读-改-写。
+
+> ⚠️ 表单原文**必须**来自服务器。不要用 `seed.ts` 的 `clientForm()` 本地重拼去"省"这次读取 ——
+> p4d 存 spec 时会做规范化（实测 `Options` 会多出 seed 没写的 `noaltsync`），自拼的表单会把
+> 未列出的字段悄悄改回默认值，而且这种错误在测试里完全静默。
+
 ### 复制模板后必须做的两件事
 
 1. **重定向 client spec**：模板里的 client `Root` 记的是模板实例的绝对路径，
-   复制后必须改回本实例（`Sandbox.#retargetClients()`），否则 p4 会把文件同步到早已被删除的目录
+   复制后必须改回本实例（`Sandbox.#retargetClients()`），否则 p4 会把文件同步到早已被删除的目录。
+   优先走 sidecar 快路径（2 次往返），缓存不可用时退回读-改-写（5 次）。
 2. **`sync -f`**：模板的 have list 声称文件已同步，普通 `sync` 会认为无事可做，
-   而磁盘上其实什么都没有（`Sandbox.#syncWorkspace()`）
+   而磁盘上其实什么都没有（`Sandbox.#syncWorkspace()`）。
+
+注意 `reset({ hard: true })` **两件事都不需要**：`seedSandbox()` 刚用本实例的路径建好 client、
+并自己 sync 过，所以那里传 `#prepareWorkspace({ retarget: false, sync: false })`。
 
 `reset({ hard: true })` 跳过模板，删干净后重新 seed —— 修改夹具定义（`src/seed.ts`）之后必须用它，
 或跑 `pnpm sandbox:snapshot` 重新生成模板。
@@ -205,11 +241,59 @@ journal / log / pid / 票据文件刻意放在 root **外面**（见 `instancePa
 **隔离粒度是"文件"而不是"用例"**（`test/fixtures.ts`，`scope: 'file'`）：
 每个测试文件从模板复制一份独立实例（独立 root、独立端口、独立工作区），文件之间可以安全并行；
 同一文件内的用例共享实例，能把它们串成一个完整故事（先提交、再回退、再校验）。
-需要每个用例都从干净基线开始，在用例开头调 `sandbox.reset()`。
+
+**会改动实例状态的用例应当独占一个文件。** 理由见"性能"一节：每个文件本来就是从模板复制出的
+干净基线，独占文件等于免费得到一次重置，而文件之间是并行的；反过来，把多个破坏性用例塞进
+一个文件、再在每个开头 `reset()` 一次，会让它们退化成串行。`test/destructive/` 下每个文件
+对应一条 reset 语义，就是这么切的。
+
+`reset()` 在同文件内只用于两种情况：验证 reset 行为本身，或用例确实要回到中途某个基线。
 
 `globalSetup` 负责生成模板，只跑一次 —— 否则多个测试文件并行启动会同时去 seed 同一份模板。
 
 调试时设 `P4_KEEP_SANDBOX=1` 跳过清理，并打印出端口与工作区路径，可直接用 P4V 连上去看现场。
+注意此时**每个测试文件各留一个实例**，看完记得 `pnpm sandbox:clean`。
+
+## 性能：瓶颈在哪、怎么测
+
+沙箱的性能瓶颈是**「p4.exe 子进程往返次数」×「串行次数」**，不是文件 IO、不是网络、
+也不是夹具规模（夹具只有 7 个几字节的文件，`sync -f` 的传输开销可以忽略）。
+本机实测标定：
+
+| 操作 | 耗时 |
+|---|---|
+| `p4.exe` 纯启动（不连服务器） | ~80ms |
+| 连活服务器的 p4 往返 | ~50-100ms |
+| **失败**的 p4 调用（连关闭端口） | **~2.1s**（p4 客户端内部重试；OS 层其实是立即 ECONNREFUSED，Node 实测 0-1ms） |
+| 连"活着但不是 p4"的监听端口 | >8s（p4 一直等握手，比死端口还慢一个数量级） |
+| p4d 干净收尾（`p4 admin stop` → 进程真的退出） | **~950ms** |
+| 模板复制（1.7MB / 109 文件） | ~50ms |
+
+四条由此得出的结论：
+
+1. **p4d 的干净收尾是最大的一笔开销**，远超"少起几个 p4 子进程"。重置路径上改用强杀（见上）。
+2. **别把破坏性用例塞进同一个文件**：它们会退化成串行。拆分前一个文件就吃掉了整套测试 97% 的墙钟。
+3. **失败的探测比成功的贵 20 倍。** 所以 `waitReady` 的首次探测必须打在一个已经在监听的端口上。
+   实测首次探测确实能打中（约 50ms），因此**没有**引入额外的 TCP 预探；将来一旦发现
+   `wait-ready` 异常变大，第一个要查的就是这里。
+4. **死端口那 2.1s 调不小**：`p4 help environment` 里没有任何超时或 net 相关变量，`net.*`
+   全是服务端 configurable，而本仓库禁止 `p4 set`（写注册表）。能做的只是把它挪出关键路径
+   —— 这就是 `test/isolation-env-precedence.test.ts` 单独成文件、且不用夹具的原因。
+
+看实测数据（按需开启，只往 stderr 写一行汇总，不影响测试输出）：
+
+```powershell
+P4_SANDBOX_TIMING=1 pnpm test
+# [timing] reset sbx-… total=486ms | stop=145ms fs=113ms … | p4-spawns=4
+```
+
+**`p4-spawns` 才是这套东西的真正货币** —— 只要它没降，墙钟变快就多半是抖动。
+各阶段的预期往返数：`start` = 4（就绪探测 1 + 重定向 2 + sync 1；自检复用就绪探测的记录，所以是 0），
+软 `reset` = 4，硬 `reset` = 15（其中 seed 约 13）。
+
+`P4_SANDBOX_TIMING` 会被 `buildP4Env()` 从子进程环境里清掉（它大小写不敏感地删掉所有 `P4*`），
+所以这个开关不会泄漏给 p4 或被测工具 —— 这是刻意的，计时状态只属于父进程。也正因如此，
+**不要**把它加进 `buildP4Env` 的输出，否则 `test/isolation.test.ts` 的白名单断言会红。
 
 ## 踩过的坑（实测记录）
 
@@ -219,7 +303,9 @@ journal / log / pid / 票据文件刻意放在 root **外面**（见 `instancePa
 |---|---|---|
 | `p4 add -c sandbox_src` 报错 | 命令**之后**的 `-c` 是 changelist，全局位置的 `-c` 才是 client | `RunP4Options.client` 注入到全局位置 |
 | `Path ... is not under client's root` | p4 用 `$PWD` 判断当前目录，盖过了子进程真实 cwd | 删 `PWD`/`OLDPWD` + 传 `-d` |
-| `p4 info` 输出为空 | `-q` 把 info 级消息一起抑制了 | 自检时不加 `-q` |
+| `p4 info` 输出为空 | `-q` 把 info 级消息一起抑制了 | 需要输出时不加 `-q`；`waitReady` 因此改用 `-z tag`，顺带把记录留给自检复用 |
+| 强杀 p4d 之后重置"失效" | 残留 journal 位于 root 之外，不会被模板复制覆盖，下次启动被重放到新数据库 | `reset()` 里显式 `rmrf(inst.journal)` |
+| client spec 字段被悄悄改回默认值 | 本地重拼的表单缺少 p4d 规范化后新增的字段（实测 `Options` 多出 `noaltsync`） | 表单原文一律取自 `p4 client -o` 的产出，不自己拼 |
 | `Unknown field name 'Description'` | user spec 没有这个字段 | 去掉 |
 | typemap 写不进去 | 字段名是 `TypeMap` 不是 `Typemap` | 用 `p4 typemap -o` 确认 |
 | `p4 clients -u sandbox` 查不到工作区 | client spec 的 `Owner` 为空（表单里没显式写） | 表单显式写 `Owner:`，查询也不加 `-u` |

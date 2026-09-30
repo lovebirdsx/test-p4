@@ -7,15 +7,9 @@
  * 这组用例刻意**不含任何具体的服务器地址**：防护的判据是"位置"与"结构"，
  * 断言也应该是对应的规则，而不是"输出里没有某个字符串"。
  */
-import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 import { describe } from 'vitest';
-import {
-  assertSandboxOwnsGlobalOptions,
-  buildP4Env,
-  field,
-  resolveP4Exe,
-  Sandbox,
-} from '../src/index.ts';
+import { assertSandboxOwnsGlobalOptions, buildP4Env, field, Sandbox } from '../src/index.ts';
 import { expect, test } from './fixtures.ts';
 
 describe('隔离防护', () => {
@@ -98,18 +92,21 @@ describe('隔离防护', () => {
     }
   });
 
-  test('进程环境变量压过注册表：指向关闭端口时连的就是该端口', async ({ sandbox }) => {
-    // 必须绕过 P4Cli 直连：参数层守卫会拒绝调用方自带 -p，这正是它该做的。
-    // 顺带一提，这条能成立还依赖 P4CONFIG=noconfig —— 否则 .p4config 会压过环境变量。
-    const env = { ...buildP4Env(sandbox.identity, sandbox.inst), P4PORT: '127.0.0.1:9' };
-    const result = spawnSync(resolveP4Exe(), ['info'], { env, encoding: 'utf8' });
-    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  // 「进程环境变量压过注册表：指向关闭端口时连的就是该端口」已挪到
+  // `isolation-env-precedence.test.ts`：那条用例有约 2s 的固有开销（连死端口时 p4
+  // 客户端内部会重试），单独成文件才能与其它文件并行，也不再需要沙箱夹具。
 
-    expect(result.status).not.toBe(0);
-    // 连的正是我们指定的端口，而不是任何别处
-    expect(output).toContain('127.0.0.1:9');
-    // 输出里不该出现任何"主机名:端口"形态（回环 IP 不会被这个模式命中）
-    expect(output).not.toMatch(/[\w-]+\.[a-z]{2,}:\d+/i);
+  test('自检复用的就绪探测记录确实指向本实例', async ({ sandbox }) => {
+    // 就绪探测会把 `p4 info` 的记录留在 server 上，自检直接复用它（省一次 p4 往返）。
+    // 这条用例确认缓存真的被填上了、且内容就是本实例的 root —— 否则"省掉一次查询"
+    // 就会悄悄变成"跳过了一次校验"。
+    const cached = sandbox.server.lastInfo;
+    expect(cached).toBeDefined();
+
+    const normalize = (value: string) => path.resolve(value).toLowerCase();
+    expect(normalize(field(cached ?? {}, 'serverRoot') ?? '')).toBe(
+      normalize(sandbox.inst.root),
+    );
   });
 
   test('自检会在服务器 root 不匹配时抛错', async ({ sandbox }) => {

@@ -22,6 +22,29 @@ export const VENDOR_DIR = path.join(PROJECT_ROOT, 'vendor');
 /** seed 完成后生成的服务器模板快照，用于秒级重置 */
 export const TEMPLATE_DIR = path.join(SANDBOX_DIR, 'template');
 
+/**
+ * 模板里 client 表单原文的缓存（sidecar）。
+ *
+ * 模板里的 client `Root` 记的是**模板实例**的路径，每个新实例都要把它改回自己。
+ * 表单内容除 Root 外全部固定，于是把服务器产出的原文缓存下来、实例侧只做一次
+ * `client -i`，就能把 5 次 p4 往返压到 2 次。
+ *
+ * 必须缓存**服务器产出的原文**（`p4 client -o`）而不是本地重拼：p4d 存 spec 时会
+ * 做规范化，自拼的表单会把未列出的字段悄悄改回默认值。
+ */
+export const CLIENT_CACHE_FILE = path.join(SANDBOX_DIR, 'template-clients.json');
+
+/**
+ * "空的 Unicode 数据库"骨架快照。
+ *
+ * 全新实例本来要现场跑一次 `p4d -r <root> -xi` 来打开 Unicode 模式（实测约 250ms，
+ * 而它正好落在 `reset({hard:true})` 的关键路径上）。把这个骨架存一份，之后直接复制
+ * 即可（约 30ms）。
+ *
+ * 注意它与 `TEMPLATE_DIR` 是两回事：这里只有数据库骨架，不含任何 depot 内容与提交历史。
+ */
+export const EMPTY_DB_DIR = path.join(SANDBOX_DIR, 'empty');
+
 /** 常驻沙箱的状态文件 */
 export const STATE_FILE = path.join(SANDBOX_DIR, 'sandbox.json');
 

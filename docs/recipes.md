@@ -58,8 +58,8 @@ p4 filelog -m 5 //depot/main/src/util.txt
 ## 快速重置
 
 ```powershell
-pnpm sandbox:reset          # 从模板恢复，约 2 秒
-pnpm sandbox:reset --hard   # 丢弃模板重新 seed，约数秒
+pnpm sandbox:reset          # 从模板恢复，约 0.5 秒
+pnpm sandbox:reset --hard   # 丢弃模板重新 seed，约 2 秒
 ```
 
 区别：`reset` 是把数据库**复制回**模板状态（快）；`--hard` 是删干净**重新跑一遍 seed**（慢，但会应用 `src/seed.ts` 里的最新改动）。

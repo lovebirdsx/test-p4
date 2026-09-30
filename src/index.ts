@@ -16,3 +16,4 @@ export * from './parse.ts';
 export * from './p4d.ts';
 export * from './seed.ts';
 export * from './sandbox.ts';
+export * from './timing.ts';

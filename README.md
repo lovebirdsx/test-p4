@@ -37,7 +37,7 @@ p4 changes -m 5 //depot/main/...
 - `src/env.ts` 删掉继承来的**全部** `P4*` 变量后写入沙箱值，并用 `P4CONFIG=noconfig` 关掉"配置文件"这条来源（环境变量本身压不过 `.p4config`，实测如此）
 - 调用方不得自带全局选项（`-p` / `--port` / `-u` / `-x` …）—— 判据是**位置**（命令名之前）而非值
 - `src/sandbox.ts` 每次启动后自检 `serverRoot` 必须等于本实例目录，不符即抛错
-- `test/isolation.test.ts` 对这些做负向验证
+- `test/isolation.test.ts` 与 `test/isolation-env-precedence.test.ts` 对这些做负向验证
 
 **但这些防护只覆盖通过 Node API 发起的调用。** 手工敲 `p4` 时：
 
@@ -51,11 +51,11 @@ p4 changes -m 5 //depot/main/...
 | 命令 | 作用 |
 |---|---|
 | `pnpm sandbox:up` / `down` / `status` | 起停常驻沙箱（固定端口 1666，方便 P4V 连接） |
-| `pnpm sandbox:reset` | 从模板恢复基线，约 2 秒 |
+| `pnpm sandbox:reset` | 从模板恢复基线，约 0.5 秒 |
 | `pnpm sandbox:reset --hard` | 丢弃模板重新 seed（改了夹具定义后用） |
 | `pnpm sandbox:snapshot` | 重新生成模板 |
 | `pnpm sandbox:clean` | 结束残留的测试实例进程 |
-| `pnpm test` | 跑全部用例（每个测试文件一个独立实例，可并行） |
+| `pnpm test` | 跑全部用例（每个测试文件一个独立实例，可并行，整套约 3 秒） |
 | `pnpm test:basic` / `test:destructive` | 只跑某一类 |
 | `pnpm test:watch` | 监听模式 |
 | `pnpm typecheck` | 类型检查 |
@@ -63,6 +63,10 @@ p4 changes -m 5 //depot/main/...
 | `pnpm fetch:p4d` | 下载官方 p4d/p4.exe 到 `vendor/`（可选） |
 
 调试时设 `P4_KEEP_SANDBOX=1` 可以让用例结束后不清理，并打印端口与工作区路径，直接用 P4V 连上去看现场。
+注意此时是**每个测试文件各留一个实例**，看完记得 `pnpm sandbox:clean`。
+
+想看清时间花在哪，设 `P4_SANDBOX_TIMING=1`：每个实例会往 stderr 打一行阶段耗时汇总，
+末尾的 `p4-spawns` 是本次启动了多少个 `p4.exe` —— 那才是这套东西的真正货币（见 [docs/design.md](docs/design.md) 的"性能"一节）。
 
 ## 环境要求
 
@@ -106,7 +110,11 @@ test('提交后 have rev 前进', async ({ sandbox }) => {
 ```
 
 每个测试文件通过 `sandbox` 夹具拿到一个独立实例（独立 root、独立端口、独立工作区）。
-需要每个用例都从干净基线开始时，在用例开头调 `await sandbox.reset()`。
+
+**会改动实例状态的用例，请让它独占一个文件** —— 每个文件本来就是从模板复制出的干净基线，
+独占文件等于免费得到一次重置，而文件之间是并行的。反过来，把一个文件里塞多个破坏性用例、
+每个开头再 `reset()` 一次，会让它们退化成串行（拆分前有个文件因此吃掉了整套测试 97% 的墙钟）。
+同文件内只在"验证 reset 行为本身"或"确实要回到中途基线"时才调 `await sandbox.reset()`。
 
 ## 把自研工具接进来
 

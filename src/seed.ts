@@ -172,15 +172,6 @@ async function writeWorkspaceFile(absPath: string, content: string | Uint8Array)
   await writeFile(absPath, content);
 }
 
-/** 查询最新的已提交 changelist 号 */
-async function latestChange(p4: P4Cli): Promise<number | undefined> {
-  const records = await p4.records(['changes', '-m', '1', '-s', 'submitted']);
-  const change = records[0]?.change;
-  if (change === undefined) return undefined;
-  const parsed = Number.parseInt(change, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 /**
  * 从空 root 建出标准夹具。可重复调用（幂等性有限：重复调用会在已有历史上继续追加提交）。
  */
@@ -219,32 +210,58 @@ export async function seedSandbox(
   }
 
   // 5) 按步骤构造提交历史
-  const changes: number[] = [];
   const primary = clients[0]?.name ?? DEFAULT_CLIENT;
   const primaryRoot = path.join(inst.wsRoot, primary);
 
   for (const step of history) {
-    for (const file of step.add ?? []) {
-      const abs = wsFile(inst, primary, file.path);
-      await writeWorkspaceFile(abs, file.content);
-      await p4.run(['add', file.path], { format: 'text', cwd: primaryRoot, client: primary });
+    // p4 的 add / edit / delete 都接受多个文件参数，一次子进程就够。逐文件调用在
+    // Windows 上每次要多花约 50ms（进程启动 + 建连），夹具里 7 个文件就是白扔半秒 ——
+    // 而这条路径在每次 `reset --hard` 上都要重走一遍，属于关键路径。
+    const adds = step.add ?? [];
+    if (adds.length > 0) {
+      for (const file of adds) {
+        await writeWorkspaceFile(wsFile(inst, primary, file.path), file.content);
+      }
+      await p4.run(['add', ...adds.map((file) => file.path)], {
+        format: 'text',
+        cwd: primaryRoot,
+        client: primary,
+      });
     }
-    for (const file of step.edit ?? []) {
-      const abs = wsFile(inst, primary, file.path);
-      await p4.run(['edit', file.path], { format: 'text', cwd: primaryRoot, client: primary });
-      await writeWorkspaceFile(abs, file.content);
+
+    const edits = step.edit ?? [];
+    if (edits.length > 0) {
+      await p4.run(['edit', ...edits.map((file) => file.path)], {
+        format: 'text',
+        cwd: primaryRoot,
+        client: primary,
+      });
+      for (const file of edits) {
+        await writeWorkspaceFile(wsFile(inst, primary, file.path), file.content);
+      }
     }
-    for (const relPath of step.delete ?? []) {
-      await p4.run(['delete', relPath], { format: 'text', cwd: primaryRoot, client: primary });
+
+    const deletes = step.delete ?? [];
+    if (deletes.length > 0) {
+      await p4.run(['delete', ...deletes], { format: 'text', cwd: primaryRoot, client: primary });
     }
 
     await p4.run(['submit', '-d', step.message], { format: 'text', cwd: primaryRoot, client: primary });
-    const change = await latestChange(p4);
-    if (change !== undefined) changes.push(change);
   }
 
   // 6) 把主工作区同步到最新
   await p4.run(['sync', '//depot/main/...'], { format: 'text', cwd: primaryRoot, client: primary });
+
+  // 7) 收尾一次性取回 changelist 号。原先每步 submit 之后都单独查一次（4 步 = 4 次多余
+  //    的 p4 往返，每次约 50ms）。`p4 changes` 默认按新到旧返回，这里翻回升序，
+  //    保持"依次创建"的语义。
+  const changes =
+    history.length === 0
+      ? []
+      : (await p4.records(['changes', '-m', String(history.length), '-s', 'submitted']))
+          .map((record) => Number.parseInt(record.change ?? '', 10))
+          .filter((value) => Number.isFinite(value))
+          .reverse();
 
   return { changes, clients: clients.map((c) => c.name), depots: createdDepots };
 }

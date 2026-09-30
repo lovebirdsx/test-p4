@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import { buildP4Env, assertSandboxOwnsGlobalOptions, type P4Identity } from './env.ts';
 import { parseTaggedOutput, type P4Record } from './parse.ts';
 import { resolveP4Exe, type InstancePaths } from './paths.ts';
+import { noteSpawn } from './timing.ts';
 
 /** 一次 p4 调用的结果 */
 export interface P4Result {
@@ -144,6 +145,7 @@ export class P4Cli {
 
     const argv = [...globalArgs, ...args];
     const startedAt = Date.now();
+    noteSpawn();
     const raw = await rawExec(this.exe, argv, {
       cwd: options.cwd,
       env: buildP4Env(this.identity, this.paths),
